@@ -1,7 +1,8 @@
 """
-app.py
+app.py  (v2)
 FileBOT — Your Smart File Assistant
 Upload → Process → Chat  |  Add more files anytime  |  Reset to start fresh
+v2: Conversational memory · Query rewriting · Hybrid retrieval · Re-ranking
 """
 
 import streamlit as st
@@ -104,7 +105,7 @@ section[data-testid="stSidebar"] { display: none; }
 .fb-divider { border: none; border-top: 1px solid var(--border); margin: 1.2rem 0; }
 
 /* CHAT */
-.chat-scroll { max-height: 500px; overflow-y: auto; padding: 4px 0; scrollbar-width: thin; scrollbar-color: var(--border-glow) var(--bg-card); }
+.chat-scroll { max-height: 520px; overflow-y: auto; padding: 4px 0; scrollbar-width: thin; scrollbar-color: var(--border-glow) var(--bg-card); }
 .chat-scroll::-webkit-scrollbar { width: 4px; }
 .chat-scroll::-webkit-scrollbar-track { background: var(--bg-card); }
 .chat-scroll::-webkit-scrollbar-thumb { background: var(--border-glow); border-radius: 2px; }
@@ -117,11 +118,12 @@ section[data-testid="stSidebar"] { display: none; }
 .chat-name { font-family: var(--font-mono); font-size: 0.68rem; font-weight: 600; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 5px; }
 .chat-name-user { color: var(--blue-bright); }
 .chat-name-bot  { color: #4ade80; }
-.chat-text { background: var(--bg-card); border: 1px solid var(--border); border-radius: 0 10px 10px 10px; padding: 10px 14px; font-size: 0.9rem; line-height: 1.65; color: var(--text-primary); }
+.chat-text { background: var(--bg-card); border: 1px solid var(--border); border-radius: 0 10px 10px 10px; padding: 10px 14px; font-size: 0.9rem; line-height: 1.65; color: var(--text-primary); white-space: pre-wrap; }
 .chat-text-user { border-color: var(--blue-dim); background: #0a1628; }
 .chat-text-bot  { border-color: #1a3d28; background: #0a1a11; }
 .sources-bar { margin-top: 6px; padding: 5px 10px; background: var(--bg-deep); border: 1px solid var(--border); border-radius: 6px; font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted); display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .src-tag { background: var(--bg-card); border: 1px solid var(--border-glow); border-radius: 4px; padding: 2px 8px; color: var(--blue-bright); font-size: 0.68rem; }
+.intent-tag { background: #0d1a2d; border: 1px solid var(--blue-dim); border-radius: 4px; padding: 2px 8px; color: var(--text-muted); font-size: 0.65rem; font-style: italic; }
 
 /* CHAT INPUT */
 [data-testid="stChatInput"] { background: var(--bg-card) !important; border: 1.5px solid var(--border-glow) !important; border-radius: 10px !important; }
@@ -135,170 +137,147 @@ section[data-testid="stSidebar"] { display: none; }
 .api-warn { background: #1a1000; border: 1px solid #78350f; border-radius: 8px; padding: 10px 14px; font-size: 0.84rem; color: #fbbf24; margin-bottom: 12px; font-family: var(--font-mono); }
 .chat-empty { text-align: center; padding: 2.5rem 1rem; color: var(--text-muted); }
 .chat-empty .bot-icon { font-size: 2.5rem; margin-bottom: 10px; display: block; opacity: 0.4; }
-.chat-empty p { font-size: 0.85rem; font-family: var(--font-mono); margin: 0; }
 </style>
 """, unsafe_allow_html=True)
 
+# ── Session State ─────────────────────────────────────────────────────────────
+from memory_manager import MemoryManager
 
-# ── Session state ────────────────────────────────────────────────────────────
-def init_session():
-    defaults = {
-        "vector_store":    None,
-        "chat_history":    [],
-        "processing_done": False,
-        "doc_stats":       {"files": 0, "chunks": 0},
-        "indexed_files":   [],   # list of filenames already in the index
-        "processing_error": None,
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
+if "vector_store"      not in st.session_state: st.session_state.vector_store      = None
+if "processing_done"   not in st.session_state: st.session_state.processing_done   = False
+if "chat_history"      not in st.session_state: st.session_state.chat_history      = []
+if "doc_stats"         not in st.session_state: st.session_state.doc_stats         = {}
+if "indexed_files"     not in st.session_state: st.session_state.indexed_files     = []
+if "processing_error"  not in st.session_state: st.session_state.processing_error  = None
+if "memory"            not in st.session_state: st.session_state.memory            = MemoryManager(max_turns=6)
 
-init_session()
+is_ready = st.session_state.processing_done and st.session_state.vector_store is not None
 
-
-# ── HEADER ───────────────────────────────────────────────────────────────────
+# ── Header ────────────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="fb-header">
     <div class="fb-logo-row">
         <span class="fb-eye"></span>
+        <span class="fb-title">File<span>BOT</span></span>
         <span class="fb-eye"></span>
     </div>
-    <div class="fb-title">File<span>BOT</span></div>
     <div class="fb-subtitle">Your Smart File Assistant</div>
-    <div class="fb-tagline">// RAG · sentence-transformers · FAISS · Groq LLaMA3.1</div>
+    <div class="fb-tagline">v2 · Hybrid RAG · Conversational Memory · Query Rewriting</div>
 </div>
 """, unsafe_allow_html=True)
 
-
-# ── API key warning ───────────────────────────────────────────────────────────
+# ── GROQ key warning ──────────────────────────────────────────────────────────
 if not os.environ.get("GROQ_API_KEY", "").strip():
-    st.markdown('<div class="api-warn">⚠ &nbsp;<strong>GROQ_API_KEY not configured.</strong> Add it to Spaces secrets to enable chat.</div>', unsafe_allow_html=True)
-
+    st.markdown(
+        '<div class="api-warn">⚠️ GROQ_API_KEY not set. '
+        'Add it in Settings → Secrets before chatting.</div>',
+        unsafe_allow_html=True,
+    )
 
 # ══════════════════════════════════════════════════════════════════════════════
 # STEP 01 — UPLOAD
 # ══════════════════════════════════════════════════════════════════════════════
-is_ready = st.session_state.processing_done
+step1_done = "done" if is_ready else ""
 st.markdown(f"""
 <div class="step-header">
-    <div class="step-number {'done' if is_ready else ''}">{'✓' if is_ready else '01'}</div>
-    <div class="step-label">{'Upload Documents' if not is_ready else 'Documents — Add More or Reset'}</div>
+    <div class="step-number {step1_done}">{'✓' if is_ready else '01'}</div>
+    <div class="step-label">Upload Documents</div>
     <div class="step-connector"></div>
 </div>
 """, unsafe_allow_html=True)
 
-# Show currently indexed files panel (when index already exists)
+uploaded = st.file_uploader(
+    "Drop PDF, TXT, or DOCX files here",
+    type=["pdf", "txt", "docx"],
+    accept_multiple_files=True,
+    label_visibility="collapsed",
+)
+
+already_indexed = set(st.session_state.indexed_files)
+new_uploads, already_uploads = [], []
+if uploaded:
+    for f in uploaded:
+        (already_uploads if f.name in already_indexed else new_uploads).append(f)
+
+    if uploaded:
+        chips_html = '<div class="file-chips">'
+        for f in already_uploads:
+            ext = f.name.rsplit(".", 1)[-1].upper()
+            chips_html += f'<div class="file-chip already"><span class="chip-ext already">{ext}</span>{f.name} ✓</div>'
+        for f in new_uploads:
+            ext = f.name.rsplit(".", 1)[-1].upper()
+            chips_html += f'<div class="file-chip new-file"><span class="chip-ext new-file">{ext}</span>{f.name} ★</div>'
+        chips_html += '</div>'
+        st.markdown(chips_html, unsafe_allow_html=True)
+
 if st.session_state.indexed_files:
     rows = "".join(
         f'<div class="indexed-file-row"><span class="indexed-dot"></span>{fn}</div>'
         for fn in st.session_state.indexed_files
     )
-    st.markdown(f"""
-    <div class="indexed-panel">
-        <div class="panel-title">📂 Indexed Files ({len(st.session_state.indexed_files)})</div>
-        {rows}
-    </div>
-    """, unsafe_allow_html=True)
-
-# File uploader — always visible
-uploaded_files = st.file_uploader(
-    "Drop files here",
-    type=["pdf", "txt", "docx"],
-    accept_multiple_files=True,
-    label_visibility="collapsed",
-    help="Supported: PDF, TXT, DOCX · Already-indexed files will be skipped automatically"
-)
-
-# Show chips with NEW vs ALREADY-INDEXED distinction
-if uploaded_files:
-    already_set = set(st.session_state.indexed_files)
-    chips_html = '<div class="file-chips">'
-    for f in uploaded_files:
-        ext   = f.name.rsplit(".", 1)[-1].upper() if "." in f.name else "FILE"
-        short = f.name if len(f.name) <= 28 else f.name[:25] + "…"
-        is_dup = f.name in already_set
-        chip_cls = "already" if is_dup else "new-file"
-        label    = "✓ indexed" if is_dup else "+ new"
-        chips_html += (
-            f'<div class="file-chip {chip_cls}">'
-            f'<span class="chip-ext {chip_cls}">{ext}</span>{short}'
-            f'<span style="font-size:0.65rem;opacity:0.7">{label}</span>'
-            f'</div>'
-        )
-    chips_html += "</div>"
-    st.markdown(chips_html, unsafe_allow_html=True)
-
+    stats = st.session_state.doc_stats
+    st.markdown(
+        f'<div class="indexed-panel"><div class="panel-title">📚 Indexed — '
+        f'{stats.get("files",0)} file(s) · {stats.get("chunks",0):,} chunks</div>'
+        f'{rows}</div>',
+        unsafe_allow_html=True,
+    )
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STEP 02 — PROCESS / ADD / RESET
+# STEP 02 — PROCESS
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown('<hr class="fb-divider">', unsafe_allow_html=True)
 st.markdown(f"""
 <div class="step-header">
-    <div class="step-number {'done' if is_ready else '02'}">{'✓' if is_ready else '02'}</div>
-    <div class="step-label">Process & Index</div>
+    <div class="step-number {'done' if is_ready else ''}">{'✓' if is_ready else '02'}</div>
+    <div class="step-label">Process Documents</div>
     <div class="step-connector"></div>
 </div>
 """, unsafe_allow_html=True)
 
-# Work out if uploaded files contain anything genuinely new
-already_set  = set(st.session_state.indexed_files)
-new_uploads  = [f for f in (uploaded_files or []) if f.name not in already_set]
-has_new      = len(new_uploads) > 0
-has_any      = bool(uploaded_files)
-
-# Decide button label
-if not is_ready:
-    btn_label = "⚙  PROCESS"
-else:
-    btn_label = f"⚙  ADD {len(new_uploads)} FILE{'S' if len(new_uploads)!=1 else ''}" if has_new else "⚙  ADD FILES"
-
-col_btn, col_reset, col_status = st.columns([1.2, 1, 2.8])
-
-with col_btn:
+col1, col2 = st.columns([3, 1])
+with col1:
+    btn_label     = "➕ Add Files" if (is_ready and new_uploads) else "⚡ Process Files"
     process_clicked = st.button(
         btn_label,
-        disabled=not has_new,
-        use_container_width=True
+        disabled=not new_uploads,
+        use_container_width=True,
     )
+with col2:
+    reset_clicked = st.button("🔄 Reset", use_container_width=True)
 
-with col_reset:
-    reset_clicked = st.button(
-        "↺  RESET",
-        disabled=not is_ready,
-        use_container_width=True
+# Status badge
+if is_ready:
+    s = st.session_state.doc_stats
+    badge_class, badge_icon, badge_msg = (
+        ("status-adding", "🔄", f"Adding {len(new_uploads)} file(s)…")
+        if new_uploads else
+        ("status-ready",  "●",  f"Ready · {s.get('files',0)} file(s) · {s.get('chunks',0):,} chunks")
     )
+elif st.session_state.processing_error:
+    badge_class, badge_icon, badge_msg = "status-error", "✕", f"Error: {st.session_state.processing_error[:60]}"
+else:
+    badge_class, badge_icon, badge_msg = "status-waiting", "○", "Waiting for documents…"
 
-with col_status:
-    if st.session_state.processing_error:
-        short_err = str(st.session_state.processing_error)[:80]
-        st.markdown(f'<div class="status-badge status-error">✗ &nbsp;{short_err}</div>', unsafe_allow_html=True)
-    elif is_ready:
-        stats = st.session_state.doc_stats
-        st.markdown(
-            f'<div class="status-badge status-ready">'
-            f'✓ &nbsp;{stats["files"]} file{"s" if stats["files"]!=1 else ""} · {stats["chunks"]:,} chunks'
-            f'</div>',
-            unsafe_allow_html=True
-        )
-    else:
-        st.markdown('<div class="status-badge status-waiting">○ &nbsp;Awaiting processing</div>', unsafe_allow_html=True)
+st.markdown(
+    f'<div class="status-badge {badge_class}">'
+    f'<span>{badge_icon}</span><span>{badge_msg}</span></div>',
+    unsafe_allow_html=True,
+)
 
-
-# ── RESET ────────────────────────────────────────────────────────────────────
+# ── Reset ─────────────────────────────────────────────────────────────────────
 if reset_clicked:
-    st.session_state.vector_store    = None
-    st.session_state.chat_history    = []
-    st.session_state.processing_done = False
-    st.session_state.doc_stats       = {"files": 0, "chunks": 0}
-    st.session_state.indexed_files   = []
-    st.session_state.processing_error = None
+    st.session_state.vector_store      = None
+    st.session_state.processing_done   = False
+    st.session_state.chat_history      = []
+    st.session_state.doc_stats         = {}
+    st.session_state.indexed_files     = []
+    st.session_state.processing_error  = None
+    st.session_state.memory            = MemoryManager(max_turns=6)
     st.success("✓ FileBOT has been reset. Upload new documents to start fresh.")
     st.rerun()
 
-
-# ── PROCESS / ADD ─────────────────────────────────────────────────────────────
+# ── Process / Add ─────────────────────────────────────────────────────────────
 if process_clicked and new_uploads:
     st.session_state.processing_error = None
     progress_bar = st.progress(0, text="Initializing…")
@@ -313,8 +292,7 @@ if process_clicked and new_uploads:
             progress_bar.progress(10 + int(28 * (i + 1) / len(new_uploads)), text=f"Loaded: {f.name}")
 
         progress_bar.progress(40, text="Chunking & embedding…")
-
-        existing_store = st.session_state.vector_store  # None on first run
+        existing_store = st.session_state.vector_store
 
         with st.spinner("Generating embeddings — first run downloads ~90MB model…"):
             store, new_added, total_chunks = process_documents(files_data, existing_store)
@@ -328,13 +306,12 @@ if process_clicked and new_uploads:
             "files":  len(st.session_state.indexed_files),
             "chunks": total_chunks,
         }
-
         progress_bar.progress(100, text="Done!")
 
-        if existing_store is None or new_added == len(files_data[0:]):
-            st.success(f"✓ Indexed {len(new_uploads)} file(s) · {new_added:,} new chunks · {total_chunks:,} total. FileBOT is ready!")
+        if existing_store is None:
+            st.success(f"✓ Indexed {len(new_uploads)} file(s) · {new_added:,} chunks. FileBOT v2 is ready!")
         else:
-            st.success(f"✓ Added {new_added:,} new chunks from {len(new_uploads)} file(s). Total: {total_chunks:,} chunks across {len(st.session_state.indexed_files)} files.")
+            st.success(f"✓ Added {new_added:,} new chunks. Total: {total_chunks:,} across {len(st.session_state.indexed_files)} file(s).")
 
         st.rerun()
 
@@ -364,6 +341,8 @@ if st.session_state.chat_history:
         role    = msg["role"]
         content = msg["content"]
         sources = msg.get("sources", [])
+        intent  = msg.get("intent", "")
+        rewritten = msg.get("rewritten_query", "")
 
         if role == "user":
             chat_html += f"""
@@ -379,9 +358,11 @@ if st.session_state.chat_history:
             if sources:
                 unique = list({(s["source"], s["page"]) for s in sources})
                 src_html = '<div class="sources-bar">📎 '
-                for sname, spage in unique:
+                for sname, spage in sorted(unique):
                     short = sname if len(sname) <= 24 else sname[:21] + "…"
                     src_html += f'<span class="src-tag">{short} · p{spage}</span>'
+                if intent:
+                    src_html += f'<span class="intent-tag">intent: {intent}</span>'
                 src_html += '</div>'
             chat_html += f"""
             <div class="chat-bubble">
@@ -395,8 +376,15 @@ if st.session_state.chat_history:
     chat_html += '</div>'
     st.markdown(chat_html, unsafe_allow_html=True)
 else:
-    msg = "FileBOT is ready. Ask anything about your documents." if is_ready else "Upload and process documents to activate FileBOT."
-    st.markdown(f'<div class="chat-empty"><span class="bot-icon">🤖</span><p>{msg}</p></div>', unsafe_allow_html=True)
+    msg = (
+        "FileBOT v2 is ready. Ask anything — I remember the conversation!"
+        if is_ready
+        else "Upload and process documents to activate FileBOT."
+    )
+    st.markdown(
+        f'<div class="chat-empty"><span class="bot-icon">🤖</span><p>{msg}</p></div>',
+        unsafe_allow_html=True,
+    )
 
 # Chat input
 if not is_ready:
@@ -405,19 +393,33 @@ else:
     user_input = st.chat_input("Ask FileBOT about your documents…")
     if user_input and user_input.strip():
         question = user_input.strip()
-        st.session_state.chat_history.append({"role": "user", "content": question})
 
         with st.spinner("FileBOT is thinking…"):
             try:
                 from rag_pipeline import answer_question
-                result = answer_question(question, st.session_state.vector_store)
-                answer  = result["answer"]
-                sources = result["sources"]
+                result = answer_question(
+                    question,
+                    st.session_state.vector_store,
+                    memory=st.session_state.memory,
+                )
+                answer   = result["answer"]
+                sources  = result["sources"]
+                intent   = result.get("intent", "general")
+                rewritten = result.get("rewritten_query", question)
             except Exception as e:
-                answer  = f"⚠️ Unexpected error: {str(e)[:200]}"
-                sources = []
+                answer    = f"⚠️ Unexpected error: {str(e)[:200]}"
+                sources   = []
+                intent    = "general"
+                rewritten = question
 
-        st.session_state.chat_history.append({"role": "assistant", "content": answer, "sources": sources})
+        st.session_state.chat_history.append({"role": "user", "content": question})
+        st.session_state.chat_history.append({
+            "role":             "assistant",
+            "content":          answer,
+            "sources":          sources,
+            "intent":           intent,
+            "rewritten_query":  rewritten,
+        })
         st.rerun()
 
 
@@ -425,6 +427,6 @@ else:
 st.markdown("""
 <div style="text-align:center;padding:2rem 0 0.5rem;font-family:'JetBrains Mono',monospace;
             font-size:0.7rem;color:#3a5170;letter-spacing:1px;">
-    FileBOT · all-MiniLM-L6-v2 · FAISS · Groq LLaMA3.1-8B-Instant
+    FileBOT v2 · MiniLM-L6-v2 · FAISS · Hybrid Retrieval · Groq LLaMA3.1-8B
 </div>
 """, unsafe_allow_html=True)

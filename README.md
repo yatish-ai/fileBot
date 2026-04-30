@@ -1,21 +1,17 @@
 ---
 title: FileBOT
-emoji: 🤖
+emoji: ⚡
 colorFrom: blue
 colorTo: indigo
 sdk: streamlit
-sdk_version: "1.32.0"
+sdk_version: 1.32.0
 app_file: app.py
 pinned: false
 ---
 
 # FileBOT — Your Smart File Assistant
-...rest of your README content...
-
-# FileBOT — Your Smart File Assistant
 
 A production-ready RAG app built with Streamlit, sentence-transformers, FAISS, and Groq.
-
 ## Flow
 
 ```
